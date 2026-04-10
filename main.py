@@ -13,7 +13,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
 HF_TOKEN       = os.environ.get("HF_TOKEN")
 
-# Модель Qwen 2.5 72B (одна из самых мощных)
 MODEL_ID = "Qwen/Qwen2.5-72B-Instruct"
 
 DB_FILE = "ai_news.db"
