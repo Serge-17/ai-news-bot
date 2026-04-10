@@ -6,14 +6,15 @@ import logging
 import requests
 import html
 import re
+from huggingface_hub import InferenceClient
 
 # ─── КОНФИГУРАЦИЯ ───────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
 HF_TOKEN       = os.environ.get("HF_TOKEN")
 
-# Модель Qwen 2.5 — она сейчас самая стабильная на HF
-HF_API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
+# Модель Qwen 2.5 72B (одна из самых мощных)
+MODEL_ID = "Qwen/Qwen2.5-72B-Instruct"
 
 DB_FILE = "ai_news.db"
 CHECK_INTERVAL = 1800 
@@ -29,6 +30,9 @@ RSS_FEEDS = [
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+# Инициализируем официальный клиент Hugging Face
+client = InferenceClient(api_key=HF_TOKEN)
 
 def init_db():
     con = sqlite3.connect(DB_FILE)
@@ -49,50 +53,45 @@ def mark_published(url: str):
     con.commit()
     con.close()
 
-# ─── ИИ ОБРАБОТКА (С ДЕТАЛЬНЫМ ЛОГОМ ОШИБОК) ───────────────────
+# ─── ИИ ОБРАБОТКА (ЧЕРЕЗ ОФИЦИАЛЬНУЮ БИБЛИОТЕКУ) ────────────────
 def process_with_ai(title, description):
     log.info(f"🤖 Анализ новости: {title[:50]}...")
     
     clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:800]
-    prompt = f"<|im_start|>system\nТы техно-блогер. Кратко перескажи новость на русском. Сделай заголовок с эмодзи, 3 тезиса и вывод. Не используй **.<|im_end|>\n<|im_start|>user\n{title}\n{clean_desc}<|im_end|>\n<|im_start|>assistant"
     
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 600, "temperature": 0.7}}
+    # Формируем запрос в формате Chat
+    messages = [
+        {"role": "system", "content": "Ты техно-блогер. Кратко перескажи новость на русском. Сделай заголовок с эмодзи, 3 тезиса и вывод. Не используй **."},
+        {"role": "user", "content": f"Заголовок: {title}\nТекст: {clean_desc}"}
+    ]
     
     try:
-        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=30)
-        result = response.json()
+        # Используем метод chat_completion, который сам найдет нужный роутер (адрес)
+        response = client.chat_completion(
+            model=MODEL_ID,
+            messages=messages,
+            max_tokens=600,
+            temperature=0.7
+        )
         
-        # Если пришла ошибка от сервера - мы её увидим!
-        if isinstance(result, dict) and "error" in result:
-            log.error(f"❌ Ошибка от Hugging Face: {result['error']}")
-            if "estimated_time" in result:
-                log.info(f"⏳ Модель загружается, подождем {int(result['estimated_time'])} сек...")
-                time.sleep(result['estimated_time'])
-            return None
-
-        # Парсим текст
-        raw_text = result[0]['generated_text'] if isinstance(result, list) else result.get('generated_text', "")
-        # Очищаем от промпта (Qwen возвращает весь текст целиком)
-        if "assistant" in raw_text:
-            final_text = raw_text.split("assistant")[-1].strip()
-        else:
-            final_text = raw_text.replace(prompt, "").strip()
-            
-        final_text = final_text.replace("**", "")
+        final_text = response.choices[0].message.content
+        final_text = final_text.replace("**", "").strip()
         
         if len(final_text) < 30:
-            log.warning(f"⚠️ Слишком короткий ответ от ИИ: {final_text}")
             return None
             
         return final_text
 
     except Exception as e:
-        log.error(f"❌ Системная ошибка при запросе к ИИ: {e}")
+        # Если модель перегружена или загружается
+        if "503" in str(e) or "loading" in str(e).lower():
+            log.warning("⏳ Модель загружается на сервере HF, подождем...")
+            time.sleep(20)
+        else:
+            log.error(f"❌ Ошибка ИИ: {e}")
         return None
 
 def send_telegram(text, url):
-    # Добавляем кнопку-ссылку внизу
     formatted_text = f"{text}\n\n🔗 <a href='{url}'>Источник</a>"
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -102,9 +101,7 @@ def send_telegram(text, url):
             "parse_mode": "HTML"
         }, timeout=15)
         return r.status_code == 200
-    except Exception as e:
-        log.error(f"❌ Ошибка отправки в TG: {e}")
-        return False
+    except: return False
 
 def check_news():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -112,7 +109,7 @@ def check_news():
         try:
             resp = requests.get(feed_url, headers=headers, timeout=10)
             feed = feedparser.parse(resp.content)
-            log.info(f"📡 Проверка ленты: {feed_url}")
+            log.info(f"📡 Проверка: {feed_url}")
             
             for entry in feed.entries[:2]:
                 url = entry.get("link", "")
@@ -128,10 +125,10 @@ def check_news():
                 else:
                     log.warning(f"⏭ Пропуск: {url}")
         except Exception as e:
-            log.error(f"📡 Ошибка доступа к ленте: {feed_url}")
+            log.error(f"📡 Ошибка ленты: {feed_url}")
 
 def main():
-    log.info("🚀 Запуск бота...")
+    log.info("🚀 Запуск обновленного бота...")
     init_db()
     while True:
         check_news()
