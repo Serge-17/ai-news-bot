@@ -8,19 +8,19 @@ import google.generativeai as genai
 import html
 import re
 
-# ─── КОНФИГУРАЦИЯ (Берем из Secrets) ─────────────────────────────
-# Важно: эти имена должны ТОЧНО совпадать с тем, что ты ввел в Settings -> Secrets
+# ─── КОНФИГУРАЦИЯ (Берем из Secrets Hugging Face) ────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Простая проверка: если ключи не подгрузились, бот выдаст ошибку в логах
+# Проверка наличия ключей
 if not all([TELEGRAM_TOKEN, CHANNEL_ID, GEMINI_API_KEY]):
-    raise ValueError("ОШИБКА: Не все секреты (Secrets) добавлены в настройках Hugging Face!")
+    print("ОШИБКА: Проверьте Secrets в настройках Space!")
 
 DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800  # 30 минут
 
+# ─── ИСТОЧНИКИ (AI Блоги + Twitter через Nitter) ──────────────────
 RSS_FEEDS = [
     "https://openai.com/news/rss.xml",
     "https://deepmind.google/blog/rss.xml",
@@ -30,40 +30,37 @@ RSS_FEEDS = [
     "https://habr.com/ru/rss/hub/artificial_intelligence/all/",
     "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt",
     "https://trends.rbc.ru/trends/rss/5d6910609a7947677846540e",
-    
-    # НОВЫЕ: Twitter-аккаунты через Nitter
+    # Twitter аккаунты (через зеркало Nitter)
     "https://nitter.privacydev.net/sama/rss",
-    "https://nitter.privacydev.net/karpathy/rss",
     "https://nitter.privacydev.net/OpenAI/rss",
-    "https://nitter.privacydev.net/ylecun/rss",
-    "https://nitter.privacydev.net/gdb/rss",
-    "https://nitter.net/GoogleDeepMind/rss"
+    "https://nitter.privacydev.net/karpathy/rss",
+    "https://nitter.privacydev.net/ylecun/rss"
 ]
 
 GEMINI_PROMPT = """Ты — профессиональный техно-журналист. Проанализируй эту новость.
 Если она на английском — переведи на русский.
 Напиши пост для Telegram:
-1) Короткий заголовок с одним подходящим эмодзи в начале.
-2) Суть новости в 3-5 маркированных пунктах (буллитах).
-3) В конце добавь краткий вывод (1 предложение), почему это важно.
+1) Короткий заголовок с эмодзи в начале.
+2) Суть новости в 3-5 тезисах.
+3) Краткий вывод, почему это важно.
 
 ВАЖНО: Не используй символы ** для жирности. Пиши обычным текстом.
 Формат ответа СТРОГО:
-ЗАГОЛОВОК: <текст>
+ЗАГОЛОВОК: <заголовок>
 ТЕЗИСЫ:
 • <тезис 1>
 • <тезис 2>
-ВЫВОД: <текст>
+ВЫВОД: <вывод>
 
 Новость:
-Заголовок: {title}
-Описание: {description}"""
+{title}
+{description}"""
 
 # ─── ЛОГИРОВАНИЕ ────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("bot.log", encoding="utf-8")]
+    handlers=[logging.StreamHandler()]
 )
 log = logging.getLogger(__name__)
 
@@ -75,40 +72,41 @@ def init_db():
     con.close()
 
 def is_published(url: str) -> bool:
-    con = sqlite3.connect(DB_FILE)
-    cur = con.execute("SELECT 1 FROM published_news WHERE url=?", (url,))
-    found = cur.fetchone() is not None
-    con.close()
-    return found
+    try:
+        con = sqlite3.connect(DB_FILE)
+        cur = con.execute("SELECT 1 FROM published_news WHERE url=?", (url,))
+        found = cur.fetchone() is not None
+        con.close()
+        return found
+    except: return False
 
 def mark_published(url: str):
-    con = sqlite3.connect(DB_FILE)
-    con.execute("INSERT OR IGNORE INTO published_news VALUES (?)", (url,))
-    con.commit()
-    con.close()
+    try:
+        con = sqlite3.connect(DB_FILE)
+        con.execute("INSERT OR IGNORE INTO published_news VALUES (?)", (url,))
+        con.commit()
+        con.close()
+    except: pass
 
-# ─── ОБРАБОТКА ТЕКСТА ───────────────────────────────────────────
-def clean_html(raw_html):
-    """Очистка текста от лишних HTML тегов из RSS"""
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, '', raw_html)
-    return html.unescape(cleantext)
-
-# ─── GEMINI AI ──────────────────────────────────────────────────
+# ─── ГЕНЕРАЦИЯ КОНТЕНТА (GEMINI) ────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Используем стабильное имя модели
+model = genai.GenerativeModel(model_name="gemini-1.5-flash")
 
-def process_with_gemini(title: str, description: str) -> dict | None:
-    # Очищаем входные данные
-    desc_clean = clean_html(description or "")[:1000]
-    prompt = GEMINI_PROMPT.format(title=title, description=desc_clean)
+def process_with_gemini(title, description):
+    # Очистка от HTML-тегов
+    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:1000]
+    prompt = GEMINI_PROMPT.format(title=title, description=clean_desc)
     
     for attempt in range(3):
         try:
             response = model.generate_content(prompt)
-            text = response.text.replace("**", "") # Убираем маркдаун, который ломает HTML в ТГ
+            if not response or not response.text:
+                continue
             
-            header, bullets, conclusion = "", [], ""
+            text = response.text.replace("**", "")
+            header, bullets, conclusion = "Новость", [], ""
+            
             for line in text.splitlines():
                 line = line.strip()
                 if line.upper().startswith("ЗАГОЛОВОК:"):
@@ -118,21 +116,19 @@ def process_with_gemini(title: str, description: str) -> dict | None:
                 elif line.upper().startswith("ВЫВОД:"):
                     conclusion = line.split(":", 1)[1].strip()
             
-            if header and bullets:
+            if bullets:
                 return {"header": header, "bullets": bullets[:5], "conclusion": conclusion}
         except Exception as e:
-            log.warning(f"Ошибка Gemini (попытка {attempt+1}): {e}")
+            log.warning(f"Ошибка Gemini: {e}")
             time.sleep(10)
     return None
 
-# ─── TELEGRAM ───────────────────────────────────────────────────
-def send_telegram(res: dict, url: str):
-    # Формируем HTML-сообщение
-    msg = f"<b>{html.escape(res['header'])}</b>\n\n"
-    for b in res['bullets']:
-        msg += f"{html.escape(b)}\n"
+# ─── ОТПРАВКА В TELEGRAM ────────────────────────────────────────
+def send_telegram(res, url):
+    msg = f"🚀 <b>{html.escape(res['header'])}</b>\n\n"
+    msg += "\n".join([html.escape(b) for b in res['bullets']])
     if res['conclusion']:
-        msg += f"\n💡 <i>Почему это важно:</i> {html.escape(res['conclusion'])}"
+        msg += f"\n\n💡 <i>Почему это важно:</i> {html.escape(res['conclusion'])}"
     msg += f"\n\n🔗 <a href='{url}'>Источник</a>"
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -149,50 +145,40 @@ def send_telegram(res: dict, url: str):
         log.error(f"Ошибка Telegram: {e}")
         return False
 
-# ─── ОСНОВНОЙ ПРОЦЕСС ───────────────────────────────────────────
-def process_feeds():
-    # Настройка заголовков, чтобы сайты не блокировали бота
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI News Bot'}
-    
+# ─── ОСНОВНОЙ ЦИКЛ ──────────────────────────────────────────────
+def check_news():
+    headers = {'User-Agent': 'Mozilla/5.0'}
     for feed_url in RSS_FEEDS:
         try:
-            # Загружаем содержимое через requests для обхода блокировок
             resp = requests.get(feed_url, headers=headers, timeout=15)
             feed = feedparser.parse(resp.content)
-            log.info(f"📡 Проверка: {feed_url} ({len(feed.entries)} записей)")
-        except Exception as e:
-            log.error(f"Ошибка парсинга {feed_url}: {e}")
-            continue
-
-        for entry in feed.entries[:3]: # Проверяем 3 последних новости из каждой ленты
-            url = entry.get("link", "")
-            if not url or is_published(url):
-                continue
-
-            title = entry.get("title", "Без заголовка")
-            summary = entry.get("summary", "") or entry.get("description", "")
-
-            log.info(f"🆕 Найдена новость: {title[:50]}...")
+            log.info(f"📡 Проверка: {feed_url}")
             
-            ai_result = process_with_gemini(title, summary)
-            if ai_result:
-                if send_telegram(ai_result, url):
-                    mark_published(url)
-                    log.info(f"✅ Опубликовано в канал!")
-                    time.sleep(10) # Защита от лимитов Gemini
-            else:
-                log.warning("❌ Не удалось обработать через ИИ")
+            # Берем только 2 последние новости, чтобы не спамить
+            for entry in feed.entries[:2]:
+                url = entry.get("link", "")
+                if not url or is_published(url):
+                    continue
+                
+                log.info(f"🆕 Найдено: {url}")
+                res = process_with_gemini(entry.get("title", ""), entry.get("summary", ""))
+                
+                if res:
+                    if send_telegram(res, url):
+                        mark_published(url)
+                        log.info(f"✅ Опубликовано!")
+                        time.sleep(10) # Защита от лимитов
+                else:
+                    log.warning("❌ Не удалось обработать")
+        except Exception as e:
+            log.error(f"Ошибка ленты {feed_url}: {e}")
 
 def main():
-    log.info("🚀 Бот запущен и мониторит новости...")
+    log.info("🚀 Бот запущен!")
     init_db()
     while True:
-        try:
-            process_feeds()
-        except Exception as e:
-            log.error(f"Ошибка в основном цикле: {e}")
-        
-        log.info(f"⏳ Ожидание {CHECK_INTERVAL//60} минут...")
+        check_news()
+        log.info(f"⏳ Сон {CHECK_INTERVAL//60} мин...")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
