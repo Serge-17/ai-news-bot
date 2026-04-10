@@ -20,6 +20,14 @@ RSS_FEEDS = [
     "https://habr.com/ru/rss/hub/artificial_intelligence/all/",
     "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt",
     "https://trends.rbc.ru/trends/rss/5d6910609a7947677846540e",
+    
+    # НОВЫЕ: Twitter-аккаунты через Nitter
+    "https://nitter.privacydev.net/sama/rss",
+    "https://nitter.privacydev.net/karpathy/rss",
+    "https://nitter.privacydev.net/OpenAI/rss",
+    "https://nitter.privacydev.net/ylecun/rss",
+    "https://nitter.privacydev.net/gdb/rss",
+    "https://nitter.net/GoogleDeepMind/rss"
 ]
 
 GEMINI_PROMPT = """Ты — профессиональный техно-журналист. Проанализируй эту новость.
