@@ -1,3 +1,2 @@
 feedparser
-groq
 requests
