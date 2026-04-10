@@ -1,3 +1,4 @@
+import os
 import feedparser
 import sqlite3
 import time
@@ -7,7 +8,16 @@ import google.generativeai as genai
 import html
 import re
 
-# ─── КОНФИГУРАЦИЯ ───────────────────────────────────────────────
+# ─── КОНФИГУРАЦИЯ (Берем из Secrets) ─────────────────────────────
+# Важно: эти имена должны ТОЧНО совпадать с тем, что ты ввел в Settings -> Secrets
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHANNEL_ID     = os.environ.get("CHANNEL_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# Простая проверка: если ключи не подгрузились, бот выдаст ошибку в логах
+if not all([TELEGRAM_TOKEN, CHANNEL_ID, GEMINI_API_KEY]):
+    raise ValueError("ОШИБКА: Не все секреты (Secrets) добавлены в настройках Hugging Face!")
+
 DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800  # 30 минут
 
