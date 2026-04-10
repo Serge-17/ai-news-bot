@@ -4,17 +4,16 @@ import sqlite3
 import time
 import logging
 import requests
-from groq import Groq
 import html
 import re
 
 # ─── КОНФИГУРАЦИЯ ───────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY")
+HF_TOKEN       = os.environ.get("HF_TOKEN")
 
-if not all([TELEGRAM_TOKEN, CHANNEL_ID, GROQ_API_KEY]):
-    print("ОШИБКА: Проверьте Secrets (TELEGRAM_TOKEN, CHANNEL_ID, GROQ_API_KEY)!")
+# Ссылка на модель (Qwen 2.5 72B - одна из лучших сейчас)
+HF_API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
 
 DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800 
@@ -24,36 +23,25 @@ RSS_FEEDS = [
     "https://deepmind.google/blog/rss.xml",
     "https://www.anthropic.com/newsfeed/rss.xml",
     "https://blogs.nvidia.com/feed/",
-    "https://aws.amazon.com/blogs/machine-learning/feed/",
     "https://habr.com/ru/rss/hub/artificial_intelligence/all/",
     "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt",
-    "https://trends.rbc.ru/trends/rss/5d6910609a7947677846540e",
-    # Twitter аккаунты (через зеркало Nitter)
-    "https://nitter.privacydev.net/sama/rss",
-    "https://nitter.privacydev.net/OpenAI/rss",
-    "https://nitter.privacydev.net/karpathy/rss",
-    "https://nitter.privacydev.net/ylecun/rss"
+    # Обновленные зеркала Twitter (Nitter)
+    "https://nitter.net/sama/rss",
+    "https://nitter.net/OpenAI/rss",
+    "https://nitter.cz/karpathy/rss"
 ]
 
-PROMPT_STYLE = """Ты — профессиональный техно-журналист. Проанализируй текст.
-Если он на английском — переведи на русский.
-Напиши пост для Telegram:
-1) Короткий заголовок с эмодзи.
-2) Суть в 3-5 тезисах.
-3) Вывод (1 предложение).
-
-ВАЖНО: Не используй символы **. Пиши обычным текстом.
-Формат СТРОГО:
+PROMPT_STYLE = """Ты — ИИ-журналист. Кратко перескажи новость на русском языке. 
+Сделай заголовок с эмодзи, 3 тезиса и вывод. Не используй **.
+Формат:
 ЗАГОЛОВОК: <текст>
 ТЕЗИСЫ:
-• <тезис 1>
-• <тезис 2>
+• <тезис>
 ВЫВОД: <текст>"""
 
 # ─── ИНИЦИАЛИЗАЦИЯ ──────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
-client = Groq(api_key=GROQ_API_KEY)
 
 def init_db():
     con = sqlite3.connect(DB_FILE)
@@ -78,25 +66,28 @@ def mark_published(url: str):
         con.close()
     except: pass
 
-# ─── ИИ ОБРАБОТКА (GROQ + LLAMA 3) ──────────────────────────────
+# ─── ИИ ОБРАБОТКА (HUGGING FACE INFERENCE) ──────────────────────
 def process_with_ai(title, description):
-    clean_text = re.sub(r'<[^>]+>', '', (description or ""))[:1500]
-    content = f"Заголовок: {title}\nТекст: {clean_text}"
+    clean_text = re.sub(r'<[^>]+>', '', (description or ""))[:1000]
+    payload = {
+        "inputs": f"<|im_start|>system\n{PROMPT_STYLE}<|im_end|>\n<|im_start|>user\n{title}\n{clean_text}<|im_end|>\n<|im_start|>assistant",
+        "parameters": {"max_new_tokens": 500, "temperature": 0.6}
+    }
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
     try:
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": PROMPT_STYLE},
-                {"role": "user", "content": content}
-            ],
-            temperature=0.5,
-            max_tokens=1000
-        )
+        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=20)
+        result = response.json()
         
-        text = completion.choices[0].message.content.replace("**", "")
+        # Парсим ответ (Hugging Face возвращает список или текст)
+        if isinstance(result, list):
+            text = result[0].get('generated_text', "").split("assistant")[-1]
+        else:
+            text = result.get('generated_text', "").split("assistant")[-1]
+            
+        text = text.replace("**", "").strip()
+        
         header, bullets, conclusion = "Новость", [], ""
-        
         for line in text.splitlines():
             line = line.strip()
             if line.upper().startswith("ЗАГОЛОВОК:"):
@@ -109,7 +100,7 @@ def process_with_ai(title, description):
         if bullets:
             return {"header": header, "bullets": bullets[:5], "conclusion": conclusion}
     except Exception as e:
-        log.error(f"Ошибка Groq: {e}")
+        log.error(f"Ошибка HF API: {e}")
     return None
 
 # ─── TELEGRAM ───────────────────────────────────────────────────
@@ -122,9 +113,7 @@ def send_telegram(res, url):
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        r = requests.post(api_url, json={
-            "chat_id": CHANNEL_ID, "text": msg, "parse_mode": "HTML"
-        }, timeout=20)
+        r = requests.post(api_url, json={"chat_id": CHANNEL_ID, "text": msg, "parse_mode": "HTML"}, timeout=20)
         return r.status_code == 200
     except: return False
 
@@ -150,10 +139,10 @@ def check_news():
                         log.info(f"✅ Опубликовано!")
                         time.sleep(5)
         except Exception as e:
-            log.error(f"Ошибка ленты {feed_url}: {e}")
+            log.error(f"Ошибка ленты {feed_url}")
 
 def main():
-    log.info("🚀 Бот запущен на Groq!")
+    log.info("🚀 Бот запущен на HF Inference API!")
     init_db()
     while True:
         check_news()
