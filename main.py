@@ -92,16 +92,25 @@ def process_with_ai(title, description):
         return None
 
 def send_telegram(text, url):
-    formatted_text = f"{text}\n\n🔗 <a href='{url}'>Источник</a>"
+    formatted_text = f"🚀 {text}\n\n🔗 <a href='{url}'>Источник</a>"
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
     try:
         r = requests.post(api_url, json={
             "chat_id": CHANNEL_ID, 
             "text": formatted_text, 
             "parse_mode": "HTML"
         }, timeout=15)
-        return r.status_code == 200
-    except: return False
+        
+        if r.status_code == 200:
+            return True
+        else:
+            # ТЕПЕРЬ МЫ УВИДИМ ОШИБКУ ОТ ТЕЛЕГРАМА В ЛОГАХ
+            log.error(f"❌ Ошибка Telegram API: {r.status_code} - {r.text}")
+            return False
+    except Exception as e:
+        log.error(f"❌ Критическая ошибка запроса к Telegram: {e}")
+        return False
 
 def check_news():
     headers = {'User-Agent': 'Mozilla/5.0'}
