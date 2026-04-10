@@ -6,16 +6,27 @@ import logging
 import requests
 import html
 import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from huggingface_hub import InferenceClient
 
-# ─── КОНФИГУРАЦИЯ ───────────────────────────────────────────────
+# --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HUGGING FACE ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', 7860), HealthCheckHandler)
+    server.serve_forever()
+
+# --- КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
 HF_TOKEN       = os.environ.get("HF_TOKEN")
-
-MODEL_ID = "Qwen/Qwen2.5-72B-Instruct"
-
-DB_FILE = "ai_news.db"
+MODEL_ID       = "Qwen/Qwen2.5-72B-Instruct"
+DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800 
 
 RSS_FEEDS = [
@@ -52,8 +63,6 @@ RSS_FEEDS = [
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
-
-# Инициализируем официальный клиент Hugging Face
 client = InferenceClient(api_key=HF_TOKEN)
 
 def init_db():
@@ -62,7 +71,7 @@ def init_db():
     con.commit()
     con.close()
 
-def is_published(url: str) -> bool:
+def is_published(url: str):
     con = sqlite3.connect(DB_FILE)
     cur = con.execute("SELECT 1 FROM published_news WHERE url=?", (url,))
     res = cur.fetchone()
@@ -75,64 +84,27 @@ def mark_published(url: str):
     con.commit()
     con.close()
 
-# ─── ИИ ОБРАБОТКА (ЧЕРЕЗ ОФИЦИАЛЬНУЮ БИБЛИОТЕКУ) ────────────────
 def process_with_ai(title, description):
-    log.info(f"🤖 Анализ новости: {title[:50]}...")
-    
     clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:800]
-    
-    # Формируем запрос в формате Chat
     messages = [
         {"role": "system", "content": "Ты техно-блогер. Кратко перескажи новость на русском. Сделай заголовок с эмодзи, 3 тезиса и вывод. Не используй **."},
         {"role": "user", "content": f"Заголовок: {title}\nТекст: {clean_desc}"}
     ]
-    
     try:
-        # Используем метод chat_completion, который сам найдет нужный роутер (адрес)
-        response = client.chat_completion(
-            model=MODEL_ID,
-            messages=messages,
-            max_tokens=600,
-            temperature=0.7
-        )
-        
+        response = client.chat_completion(model=MODEL_ID, messages=messages, max_tokens=600, temperature=0.7)
         final_text = response.choices[0].message.content
-        final_text = final_text.replace("**", "").strip()
-        
-        if len(final_text) < 30:
-            return None
-            
-        return final_text
-
+        return final_text.replace("**", "").strip()
     except Exception as e:
-        # Если модель перегружена или загружается
-        if "503" in str(e) or "loading" in str(e).lower():
-            log.warning("⏳ Модель загружается на сервере HF, подождем...")
-            time.sleep(20)
-        else:
-            log.error(f"❌ Ошибка ИИ: {e}")
+        log.error(f"Ошибка ИИ: {e}")
         return None
 
 def send_telegram(text, url):
-    formatted_text = f"🚀 {text}\n\n🔗 <a href='{url}'>Источник</a>"
+    formatted_text = f"{text}\n\n🔗 <a href='{url}'>Источник</a>"
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
     try:
-        r = requests.post(api_url, json={
-            "chat_id": CHANNEL_ID, 
-            "text": formatted_text, 
-            "parse_mode": "HTML"
-        }, timeout=15)
-        
-        if r.status_code == 200:
-            return True
-        else:
-            # ТЕПЕРЬ МЫ УВИДИМ ОШИБКУ ОТ ТЕЛЕГРАМА В ЛОГАХ
-            log.error(f"❌ Ошибка Telegram API: {r.status_code} - {r.text}")
-            return False
-    except Exception as e:
-        log.error(f"❌ Критическая ошибка запроса к Telegram: {e}")
-        return False
+        requests.post(api_url, json={"chat_id": CHANNEL_ID, "text": formatted_text, "parse_mode": "HTML"}, timeout=15)
+        return True
+    except: return False
 
 def check_news():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -140,30 +112,25 @@ def check_news():
         try:
             resp = requests.get(feed_url, headers=headers, timeout=10)
             feed = feedparser.parse(resp.content)
-            log.info(f"📡 Проверка: {feed_url}")
-            
-            for entry in feed.entries[:2]:
+            for entry in feed.entries[:1]: # Берем только 1 самую свежую новость
                 url = entry.get("link", "")
                 if not url or is_published(url): continue
-                
                 ai_text = process_with_ai(entry.get("title", ""), entry.get("summary", ""))
-                
-                if ai_text:
-                    if send_telegram(ai_text, url):
-                        mark_published(url)
-                        log.info("✅ Опубликовано!")
-                        time.sleep(10)
-                else:
-                    log.warning(f"⏭ Пропуск: {url}")
-        except Exception as e:
-            log.error(f"📡 Ошибка ленты: {feed_url}")
+                if ai_text and send_telegram(ai_text, url):
+                    mark_published(url)
+                    log.info(f"✅ Опубликовано: {url}")
+                    time.sleep(10)
+        except: pass
 
 def main():
-    log.info("🚀 Запуск обновленного бота...")
     init_db()
+    # Запускаем фейковый сервер в отдельном потоке
+    threading.Thread(target=run_health_server, daemon=True).start()
+    log.info("🚀 Бот и Health-сервер запущены!")
+    
     while True:
         check_news()
-        log.info(f"⏳ Сон 30 минут...")
+        log.info("⏳ Сон 30 мин...")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
