@@ -20,12 +20,35 @@ DB_FILE = "ai_news.db"
 CHECK_INTERVAL = 1800 
 
 RSS_FEEDS = [
-    "https://openai.com/news/rss.xml",
-    "https://deepmind.google/blog/rss.xml",
-    "https://www.anthropic.com/newsfeed/rss.xml",
-    "https://blogs.nvidia.com/feed/",
-    "https://habr.com/ru/rss/hub/artificial_intelligence/all/",
-    "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt"
+    # --- ГИГАНТЫ ИИ (ОФИЦИАЛЬНЫЕ БЛОГИ) ---
+    "https://openai.com/news/rss.xml",                # OpenAI
+    "https://deepmind.google/blog/rss.xml",           # Google DeepMind
+    "https://www.anthropic.com/newsfeed/rss.xml",     # Anthropic (Claude)
+    "https://blogs.nvidia.com/feed/",                 # NVIDIA
+    "https://ai.meta.com/blog/rss/",                  # Meta AI (Llama)
+    "https://blogs.microsoft.com/ai/feed/",           # Microsoft AI
+    "https://machinelearning.apple.com/rss.xml",      # Apple Machine Learning
+    "https://mistral.ai/news/index.xml",              # Mistral AI (Франция)
+    
+    # --- ТВИТТЕР (ЧЕРЕЗ NITTER - ГЛАВНЫЕ ЛИЦА) ---
+    # Мы используем зеркало nitter.no-logs.com (оно сейчас стабильнее)
+    "https://nitter.no-logs.com/sama/rss",            # Сэм Альтман (OpenAI)
+    "https://nitter.no-logs.com/karpathy/rss",        # Андрей Карпатый
+    "https://nitter.no-logs.com/ylecun/rss",          # Ян Лекун (Meta)
+    "https://nitter.no-logs.com/demishassabis/rss",   # Демис Хассабис (DeepMind)
+    "https://nitter.no-logs.com/gdb/rss",             # Грег Брокман (OpenAI)
+    "https://nitter.no-logs.com/ilyasut/rss",         # Илья Суцкевер
+    
+    # --- ТЕХНО-НОВОСТИ И АГРЕГАТОРЫ ---
+    "https://huggingface.co/blog/feed.xml",           # Hugging Face Blog
+    "https://techcrunch.com/category/artificial-intelligence/feed/", # TechCrunch AI
+    "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml", # The Verge AI
+    "https://export.arxiv.org/rss/cs.AI",             # Новые научные статьи (Arxiv)
+    
+    # --- РУССКОЯЗЫЧНЫЕ ИСТОЧНИКИ ---
+    "https://habr.com/ru/rss/hub/artificial_intelligence/all/", # Хабр ИИ
+    "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt",      # VC.ru ИИ
+    "https://trends.rbc.ru/trends/rss/5d6910609a7947677846540e" # РБК Тренды ИИ
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
