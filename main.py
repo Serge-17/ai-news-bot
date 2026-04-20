@@ -7,6 +7,7 @@ import requests
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
 from huggingface_hub import InferenceClient
 from difflib import SequenceMatcher
 
@@ -16,6 +17,9 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        pass  # Заглушаем логи HTTP-сервера
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 7860), HealthCheckHandler)
@@ -27,87 +31,283 @@ CHANNEL_ID     = os.environ.get("CHANNEL_ID")
 HF_TOKEN       = os.environ.get("HF_TOKEN")
 MODEL_ID       = "Qwen/Qwen2.5-72B-Instruct"
 DB_FILE        = "ai_news.db"
-CHECK_INTERVAL = 1800 # 30 минут
+CHECK_INTERVAL       = 1800   # 30 минут
+MAX_PER_FEED         = 5      # Максимум статей с одной ленты за цикл
+SIMILARITY_DB        = 0.72   # Порог схожести для проверки по БД (межцикловая дедупликация)
+SIMILARITY_CYCLE     = 0.60   # Порог схожести внутри одного цикла (ловим одну историю с разных сайтов)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 client = InferenceClient(api_key=HF_TOKEN)
 
-# --- СПИСОК ИСТОЧНИКОВ ---
-RSS_FEED_TAGS_WITH_KEYWORDS = [
-    {"url": "https://blogs.nvidia.com/feed/", "tag": "#ГолосовыеТехнологииИИ", "keywords": ["voice", "speech", "audio", "gpu", "cuda"]},
-    {"url": "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml", "tag": "#GoClawTech", "keywords": ["agent", "llm", "automation"]},
-    {"url": "https://techcrunch.com/category/artificial-intelligence/feed/", "tag": "#ОбщиеНовостиИИ", "keywords": ["ai", "model", "startup"]},
-    {"url": "https://huggingface.co/blog/feed.xml", "tag": "#GoClawTech", "keywords": ["model", "dataset", "agent"]},
-    {"url": "https://openai.com/news/rss.xml", "tag": "#ОбщиеНовостиИИ", "keywords": ["gpt", "openai", "sam altman"]},
-    {"url": "https://habr.com/ru/rss/hub/artificial_intelligence/all/", "tag": "#ОбщиеНовостиИИ", "keywords": ["ии", "нейросети", "ml"]},
-    {"url": "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt", "tag": "#ОбщиеНовостиИИ", "keywords": ["ии", "нейросети"]},
-    {"url": "https://nextjs.org/feed.xml", "tag": "#ФронтендРазработка", "keywords": ["next.js", "react", "frontend"]},
-    # Добавьте остальные свои ссылки сюда в том же формате
+# ---------------------------------------------------------------------------
+# ИСТОЧНИКИ НОВОСТЕЙ
+# Формат: url, tag (хештег в посте), keywords (хотя бы одно должно быть в тексте)
+# ---------------------------------------------------------------------------
+RSS_FEEDS = [
+
+    # ── ОБЩИЕ НОВОСТИ ИИ ───────────────────────────────────────────────────
+    {
+        "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "model", "startup", "llm", "openai", "anthropic", "gemini"]
+    },
+    {
+        "url": "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "agent", "llm", "automation", "openai", "google", "meta"]
+    },
+    {
+        "url": "https://venturebeat.com/category/ai/feed/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "model", "agent", "inference", "enterprise"]
+    },
+    {
+        "url": "https://www.artificialintelligence-news.com/feed/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "machine learning", "neural", "model"]
+    },
+    {
+        "url": "https://openai.com/news/rss.xml",
+        "tag": "#НовостиИИ",
+        "keywords": ["gpt", "openai", "sora", "agents", "o1", "o3"]
+    },
+    {
+        "url": "https://www.anthropic.com/rss.xml",
+        "tag": "#НовостиИИ",
+        "keywords": ["claude", "anthropic", "safety", "agent"]
+    },
+    {
+        "url": "https://ai.googleblog.com/feeds/posts/default",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "gemini", "model", "research", "agent"]
+    },
+    {
+        "url": "https://huggingface.co/blog/feed.xml",
+        "tag": "#OpenSourceAI",
+        "keywords": ["model", "dataset", "agent", "fine-tuning", "open-source", "lora"]
+    },
+    {
+        "url": "https://habr.com/ru/rss/hub/artificial_intelligence/all/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ии", "нейросети", "ml", "llm", "агент", "модель"]
+    },
+    {
+        "url": "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt",
+        "tag": "#НовостиИИ",
+        "keywords": ["ии", "нейросети", "gpt", "claude", "модель"]
+    },
+
+    # ── ГОЛОС / TTS / КЛОНИРОВАНИЕ ГОЛОСА ─────────────────────────────────
+    {
+        "url": "https://blogs.nvidia.com/feed/",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "tts", "audio", "cloning", "synthesis", "deepfake voice"]
+    },
+    {
+        "url": "https://techcrunch.com/tag/voice/feed/",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "audio", "clone", "synthesis", "eleven labs", "elevenlabs"]
+    },
+    {
+        "url": "https://elevenlabs.io/blog/rss.xml",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "audio", "clone", "tts"]
+    },
+    {
+        "url": "https://www.deepmind.com/blog/rss.xml",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "audio", "language", "model", "gemini"]
+    },
+
+    # ── СОЦИАЛЬНЫЕ СЕТИ / CREATOR ECONOMY ─────────────────────────────────
+    {
+        "url": "https://socialmediatoday.com/rss.xml",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "reels", "shorts", "tiktok", "instagram", "ai content", "ugc", "influencer"]
+    },
+    {
+        "url": "https://www.socialmediaexaminer.com/feed/",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "shorts", "reels", "ai", "automation", "content", "brand"]
+    },
+    {
+        "url": "https://later.com/blog/feed/",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "social media", "reels", "shorts", "tiktok", "instagram", "brand deal"]
+    },
+    {
+        "url": "https://www.tubefilter.com/feed/",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "youtube", "shorts", "monetization", "sponsor", "brand", "influencer"]
+    },
+
+    # ── AD TECH / МОНЕТИЗАЦИЯ / CPA ────────────────────────────────────────
+    {
+        "url": "https://adexchanger.com/feed/",
+        "tag": "#AdTech",
+        "keywords": ["programmatic", "cpa", "cpc", "brand", "ad", "affiliate", "performance", "ai"]
+    },
+    {
+        "url": "https://martech.org/feed/",
+        "tag": "#AdTech",
+        "keywords": ["ai", "brand", "marketing", "automation", "cpa", "conversion", "affiliate"]
+    },
+    {
+        "url": "https://digiday.com/feed/",
+        "tag": "#AdTech",
+        "keywords": ["brand", "ad", "creator", "influencer", "cpa", "ai", "monetization", "social"]
+    },
+    {
+        "url": "https://www.marketingweek.com/feed/",
+        "tag": "#AdTech",
+        "keywords": ["brand", "ad", "creator", "influencer", "ai", "affiliate", "performance marketing"]
+    },
+
+    # ── AI-АГЕНТЫ / АВТОМАТИЗАЦИЯ ──────────────────────────────────────────
+    {
+        "url": "https://agentsnews.io/rss.xml",
+        "tag": "#AIАгенты",
+        "keywords": ["agent", "automation", "workflow", "autonomous", "agentic", "multi-agent"]
+    },
+    {
+        "url": "https://www.llmsecurity.net/rss.xml",
+        "tag": "#AIАгенты",
+        "keywords": ["agent", "llm", "autonomous", "tool use", "multi-agent"]
+    },
+    {
+        "url": "https://techcrunch.com/tag/automation/feed/",
+        "tag": "#AIАгенты",
+        "keywords": ["automation", "agent", "ai", "workflow", "autonomous"]
+    },
+
+    # ── СТАРТАПЫ / ИНВЕСТИЦИИ ──────────────────────────────────────────────
+    {
+        "url": "https://techcrunch.com/category/startups/feed/",
+        "tag": "#AIСтартапы",
+        "keywords": ["ai", "funding", "series", "seed", "startup", "venture", "raise"]
+    },
+    {
+        "url": "https://sifted.eu/rss",
+        "tag": "#AIСтартапы",
+        "keywords": ["ai", "startup", "funding", "series", "venture", "raise", "scaleup"]
+    },
+
+    # ── БЕСПЛАТНЫЙ AI / FREEMIUM МОДЕЛИ ───────────────────────────────────
+    {
+        "url": "https://techcrunch.com/tag/free/feed/",
+        "tag": "#БесплатныйAI",
+        "keywords": ["free", "freemium", "open-source", "no-code", "affordable", "subscription", "access"]
+    },
 ]
 
-# --- РАБОТА С БД ---
+# ---------------------------------------------------------------------------
+# РАБОТА С БД
+# ---------------------------------------------------------------------------
 def init_db():
     con = sqlite3.connect(DB_FILE)
     con.execute("""
         CREATE TABLE IF NOT EXISTS published_news (
-            url TEXT PRIMARY KEY, 
-            title TEXT, 
+            url        TEXT PRIMARY KEY,
+            title      TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     con.commit()
     con.close()
 
-def is_duplicate(url, title):
+def get_domain(url: str) -> str:
+    try:
+        return urlparse(url).netloc.replace("www.", "")
+    except Exception:
+        return ""
+
+def titles_are_similar(a: str, b: str, threshold: float) -> bool:
+    """Проверяет схожесть двух заголовков по порогу threshold."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
+
+
+def is_duplicate(url: str, title: str, cycle_titles: list[str]) -> bool:
+    """
+    Проверяет, является ли статья дубликатом:
+    1. По точному URL (в БД).
+    2. По схожести заголовка с уже опубликованными в БД (межцикловая).
+    3. По схожести заголовка с уже одобренными в ТЕКУЩЕМ цикле (кросс-источниковая).
+    """
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
-    
-    # 1. Проверка по URL
+
+    # 1. Точная проверка по URL
     cur.execute("SELECT 1 FROM published_news WHERE url=?", (url,))
     if cur.fetchone():
         con.close()
         return True
-    
-    # 2. Проверка по схожести заголовка (с последними 40 записями)
-    cur.execute("SELECT title FROM published_news ORDER BY created_at DESC LIMIT 40")
-    recent_titles = cur.fetchall()
+
+    # 2. Нечёткая проверка по БД (последние 80 записей, межцикловая)
+    cur.execute("SELECT title FROM published_news ORDER BY created_at DESC LIMIT 80")
+    recent_db_titles = [row[0] for row in cur.fetchall()]
     con.close()
-    
-    for (old_title,) in recent_titles:
-        similarity = SequenceMatcher(None, title.lower(), old_title.lower()).ratio()
-        if similarity > 0.72: # Если заголовки похожи на 72%+, это дубль
-            log.info(f"Дубликат по заголовку: '{title}' похож на '{old_title}' ({int(similarity*100)}%)")
+
+    for old_title in recent_db_titles:
+        if titles_are_similar(title, old_title, SIMILARITY_DB):
+            log.info(f"Дубликат (БД, {SIMILARITY_DB*100:.0f}%+): '{title[:60]}'")
             return True
+
+    # 3. Кросс-источниковая проверка: та же история уже одобрена в этом цикле
+    for cycle_title in cycle_titles:
+        if titles_are_similar(title, cycle_title, SIMILARITY_CYCLE):
+            log.info(f"Дубликат (цикл, {SIMILARITY_CYCLE*100:.0f}%+): '{title[:60]}' ≈ '{cycle_title[:60]}'")
+            return True
+
     return False
 
-def mark_published(url, title):
+def mark_published(url: str, title: str):
     try:
         con = sqlite3.connect(DB_FILE)
-        con.execute("INSERT OR IGNORE INTO published_news (url, title) VALUES (?, ?)", (url, title))
+        con.execute(
+            "INSERT OR IGNORE INTO published_news (url, title) VALUES (?, ?)",
+            (url, title)
+        )
         con.commit()
         con.close()
     except Exception as e:
         log.error(f"Ошибка записи в БД: {e}")
 
-# --- ЛОГИКА ---
-def process_with_ai(title, description, tag):
-    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:1000]
-    prompt = f"Ты техно-блогер. Кратко перескажи новость на русском. Сделай заголовок с эмодзи, 3 тезиса и вывод. Не используй жирный шрифт **. Будь лаконичным.\n\nЗаголовок: {title}\nТекст: {clean_desc}"
-    
+# ---------------------------------------------------------------------------
+# AI-ОБРАБОТКА
+# ---------------------------------------------------------------------------
+def process_with_ai(title: str, description: str, tag: str) -> str | None:
+    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:1200]
+    prompt = (
+        "Ты техно-блогер для Telegram-канала об AI и GoClaw — первой в мире "
+        "рекламной AI-платформе (пользователи получают бесплатный доступ к Claude/GPT/Midjourney "
+        "в обмен на то, что AI-агент публикует Stories/Shorts с их клонированным голосом; "
+        "бренды платят по CPA-модели).\n\n"
+        "Перескажи новость КРАТКО на русском языке:\n"
+        "— Заголовок с одним релевантным эмодзи\n"
+        "— 3 коротких тезиса (без нумерации, каждый с эмодзи)\n"
+        "— 1 строка вывода: почему это важно для AI-рынка или для создателей контента\n"
+        "Не используй жирный шрифт **. Не пиши 'Вывод:' или 'Заголовок:' — просто текст.\n\n"
+        f"Заголовок оригинала: {title}\n"
+        f"Текст: {clean_desc}"
+    )
+
     try:
         response = client.chat_completion(
-            model=MODEL_ID, 
-            messages=[{"role": "user", "content": prompt}], 
-            max_tokens=600
+            model=MODEL_ID,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700
         )
         res_text = response.choices[0].message.content
-        return f"{tag}\n{res_text.replace('**', '').strip()}"
+        return f"{tag}\n\n{res_text.replace('**', '').strip()}"
     except Exception as e:
         log.error(f"AI Error: {e}")
         return None
 
-def send_telegram(text, url):
+# ---------------------------------------------------------------------------
+# ОТПРАВКА В TELEGRAM
+# ---------------------------------------------------------------------------
+def send_telegram(text: str, url: str) -> bool:
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
@@ -117,77 +317,91 @@ def send_telegram(text, url):
     }
     try:
         r = requests.post(api_url, json=payload, timeout=20)
+        if r.status_code != 200:
+            log.warning(f"TG вернул {r.status_code}: {r.text[:200]}")
         return r.status_code == 200
     except Exception as e:
         log.error(f"TG Error: {e}")
         return False
 
+# ---------------------------------------------------------------------------
+# ОСНОВНАЯ ПРОВЕРКА
+# ---------------------------------------------------------------------------
 def check_news():
-    log.info(f"--- НАЧАЛО ПРОВЕРКИ ({len(RSS_FEED_TAGS_WITH_KEYWORDS)} лент) ---")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
-    for feed_item in RSS_FEED_TAGS_WITH_KEYWORDS:
+    log.info(f"--- НАЧАЛО ПРОВЕРКИ ({len(RSS_FEEDS)} лент) ---")
+    headers = {'User-Agent': 'Mozilla/5.0 (compatible; AINewsBot/2.0)'}
+
+    # Заголовки, одобренные в ЭТОМ цикле — для кросс-источниковой дедупликации
+    cycle_titles: list[str] = []
+    total_published = 0
+
+    for feed_item in RSS_FEEDS:
         url_feed = feed_item["url"]
-        tag = feed_item["tag"]
+        tag      = feed_item["tag"]
         keywords = feed_item.get("keywords", [])
-        
-        log.info(f"Обработка ленты: {url_feed}")
-        
+
+        log.info(f"Обработка: {url_feed}")
+
         try:
-            resp = requests.get(url_feed, headers=headers, timeout=20)
+            resp = requests.get(url_feed, headers=headers, timeout=25)
+            resp.raise_for_status()
             feed = feedparser.parse(resp.content)
-            
-            # Проверяем первые 3 записи в каждой ленте
-            for entry in feed.entries[:3]:
-                link = entry.get("link")
-                title = entry.get("title", "")
-                summary = entry.get("summary", "") or entry.get("description", "")
-
-                if not link or not title:
-                    continue
-
-                # 1. Проверка на дубликат (URL или Заголовок)
-                if is_duplicate(link, title):
-                    continue
-
-                # 2. Проверка на релевантность ключевым словам
-                full_text = f"{title} {summary}".lower()
-                if keywords and not any(kw.lower() in full_text for kw in keywords):
-                    continue
-
-                log.info(f"Новая новость найдена: {title}")
-                
-                # 3. Обработка через AI
-                ai_text = process_with_ai(title, summary, tag)
-                if ai_text:
-                    # 4. Отправка
-                    if send_telegram(ai_text, link):
-                        mark_published(link, title)
-                        log.info(f"✅ Опубликовано: {title}")
-                        time.sleep(15) # Пауза чтобы избежать спам-фильтра TG
-                    else:
-                        log.warning(f"❌ Сбой отправки в TG: {title}")
-                
         except Exception as e:
-            log.error(f"Ошибка при обработке ленты {url_feed}: {e}")
-            continue # Переходим к следующей ленте, если эта упала
-            
-    log.info("--- ПРОВЕРКА ВСЕХ ЛЕНТ ЗАВЕРШЕНА ---")
+            log.error(f"Ошибка загрузки ленты {url_feed}: {e}")
+            continue
 
+        for entry in feed.entries[:MAX_PER_FEED]:
+            link    = entry.get("link", "")
+            title   = entry.get("title", "").strip()
+            summary = entry.get("summary", "") or entry.get("description", "")
+
+            if not link or not title:
+                continue
+
+            # ── Дедупликация: по URL, по БД и по текущему циклу ───────────
+            if is_duplicate(link, title, cycle_titles):
+                continue
+
+            # ── Проверка релевантности ключевым словам ─────────────────────
+            full_text = f"{title} {re.sub(r'<[^>]+>', '', summary)}".lower()
+            if keywords and not any(kw.lower() in full_text for kw in keywords):
+                log.info(f"Нерелевантно: {title[:60]}")
+                continue
+
+            log.info(f"📰 Новая новость: {title[:80]}")
+
+            # ── AI-обработка ───────────────────────────────────────────────
+            ai_text = process_with_ai(title, summary, tag)
+            if not ai_text:
+                continue
+
+            # ── Отправка ───────────────────────────────────────────────────
+            if send_telegram(ai_text, link):
+                mark_published(link, title)
+                cycle_titles.append(title)   # Регистрируем в памяти цикла
+                total_published += 1
+                log.info(f"✅ Опубликовано: {title[:60]}")
+                time.sleep(12)
+            else:
+                log.warning(f"❌ Сбой отправки: {title[:60]}")
+
+    log.info(f"--- ПРОВЕРКА ЗАВЕРШЕНА | Опубликовано: {total_published} ---")
+
+# ---------------------------------------------------------------------------
+# ТОЧКА ВХОДА
+# ---------------------------------------------------------------------------
 def main():
     init_db()
-    # Запуск Health-сервера для Hugging Face / Render / Railway
     threading.Thread(target=run_health_server, daemon=True).start()
-    
-    log.info("🚀 Бот запущен и готов к работе!")
-    
+    log.info("🚀 GoClaw AI News Bot v2 запущен!")
+
     while True:
         try:
             check_news()
         except Exception as e:
             log.critical(f"Критическая ошибка в основном цикле: {e}")
-        
-        log.info(f"⏳ Сон {CHECK_INTERVAL//60} минут до следующей итерации...")
+
+        log.info(f"⏳ Следующая проверка через {CHECK_INTERVAL // 60} минут...")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
