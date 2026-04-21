@@ -8,7 +8,7 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
-from huggingface_hub import InferenceClient
+import google.generativeai as genai
 from difflib import SequenceMatcher
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
@@ -28,13 +28,17 @@ def run_health_server():
 # --- КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
-HF_TOKEN       = os.environ.get("HF_TOKEN")
-MODEL_ID       = "Qwen/Qwen2.5-72B-Instruct"
+GEMINI_TOKEN   = os.environ.get("GEMINI_TOKEN") # Меняем здесь
+MODEL_ID       = "gemini-2.5-flash"             # Gemini 1.5 Flash — быстрая и дешевая (или 'gemini-1.5-pro')
 DB_FILE        = "ai_news.db"
-CHECK_INTERVAL       = 1800   # 30 минут
-MAX_PER_FEED         = 5      # Максимум статей с одной ленты за цикл
-SIMILARITY_DB        = 0.72   # Порог схожести для проверки по БД (межцикловая дедупликация)
-SIMILARITY_CYCLE     = 0.60   # Порог схожести внутри одного цикла (ловим одну историю с разных сайтов)
+CHECK_INTERVAL = 1800   
+
+# Настройка Gemini
+genai.configure(api_key=GEMINI_TOKEN)
+model = genai.GenerativeModel(MODEL_ID)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -277,7 +281,8 @@ def mark_published(url: str, title: str):
 # AI-ОБРАБОТКА
 # ---------------------------------------------------------------------------
 def process_with_ai(title: str, description: str, tag: str) -> str | None:
-    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:1200]
+    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:2000] # У 2.0 контекст огромный
+    
     prompt = (
         "Ты техно-блогер для Telegram-канала об AI и GoClaw — первой в мире "
         "рекламной AI-платформе (пользователи получают бесплатный доступ к Claude/GPT/Midjourney "
@@ -287,21 +292,27 @@ def process_with_ai(title: str, description: str, tag: str) -> str | None:
         "— Заголовок с одним релевантным эмодзи\n"
         "— 3 коротких тезиса (без нумерации, каждый с эмодзи)\n"
         "— 1 строка вывода: почему это важно для AI-рынка или для создателей контента\n"
-        "Не используй жирный шрифт **. Не пиши 'Вывод:' или 'Заголовок:' — просто текст.\n\n"
+        "Не используй жирный шрифт **. Не пиши слово 'Заголовок' или 'Вывод'.\n\n"
         f"Заголовок оригинала: {title}\n"
-        f"Текст: {clean_desc}"
+        f"Текст новости: {clean_desc}"
     )
 
     try:
-        response = client.chat_completion(
-            model=MODEL_ID,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=700
-        )
-        res_text = response.choices[0].message.content
-        return f"{tag}\n\n{res_text.replace('**', '').strip()}"
+        # У Gemini 2.0 Flash очень высокая скорость генерации
+        response = model.generate_content(prompt)
+        
+        if not response or not response.text:
+            return None
+            
+        res_text = response.text
+        # Убираем жирный шрифт (Markdown **), так как TG в HTML моде может криво его принять 
+        # или просто по твоему ТЗ мы его не хотим
+        final_text = res_text.replace('**', '').strip()
+        
+        return f"{tag}\n\n{final_text}"
+        
     except Exception as e:
-        log.error(f"AI Error: {e}")
+        log.error(f"Gemini 2.0 Error: {e}")
         return None
 
 # ---------------------------------------------------------------------------
