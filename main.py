@@ -8,7 +8,7 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
-import google.generativeai as genai
+from google import genai  # Новая библиотека
 from difflib import SequenceMatcher
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
@@ -17,9 +17,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is alive!")
-
     def log_message(self, format, *args):
-        pass  # Заглушаем логи HTTP-сервера
+        pass
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 7860), HealthCheckHandler)
@@ -28,21 +27,19 @@ def run_health_server():
 # --- КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
-GEMINI_TOKEN   = os.environ.get("GEMINI_TOKEN") # Меняем здесь
-MODEL_ID       = "gemini-2.5-flash"             # Gemini 1.5 Flash — быстрая и дешевая (или 'gemini-1.5-pro')
+GEMINI_TOKEN   = os.environ.get("GEMINI_TOKEN") # Используем новый токен
+MODEL_ID       = "gemini-2.0-flash" 
 DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800   
-
-# Настройка Gemini
-genai.configure(api_key=GEMINI_TOKEN)
-model = genai.GenerativeModel(MODEL_ID)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
+MAX_PER_FEED   = 5      
+SIMILARITY_DB  = 0.72   
+SIMILARITY_CYCLE = 0.60 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
-client = InferenceClient(api_key=HF_TOKEN)
+
+# Инициализация клиента Gemini (новая версия)
+client = genai.Client(api_key=GEMINI_TOKEN)
 
 # ---------------------------------------------------------------------------
 # ИСТОЧНИКИ НОВОСТЕЙ
@@ -205,9 +202,7 @@ RSS_FEEDS = [
     },
 ]
 
-# ---------------------------------------------------------------------------
-# РАБОТА С БД
-# ---------------------------------------------------------------------------
+# --- РАБОТА С БД ---
 def init_db():
     con = sqlite3.connect(DB_FILE)
     con.execute("""
@@ -220,199 +215,99 @@ def init_db():
     con.commit()
     con.close()
 
-def get_domain(url: str) -> str:
-    try:
-        return urlparse(url).netloc.replace("www.", "")
-    except Exception:
-        return ""
-
 def titles_are_similar(a: str, b: str, threshold: float) -> bool:
-    """Проверяет схожесть двух заголовков по порогу threshold."""
     return SequenceMatcher(None, a.lower(), b.lower()).ratio() >= threshold
 
-
 def is_duplicate(url: str, title: str, cycle_titles: list[str]) -> bool:
-    """
-    Проверяет, является ли статья дубликатом:
-    1. По точному URL (в БД).
-    2. По схожести заголовка с уже опубликованными в БД (межцикловая).
-    3. По схожести заголовка с уже одобренными в ТЕКУЩЕМ цикле (кросс-источниковая).
-    """
     con = sqlite3.connect(DB_FILE)
     cur = con.cursor()
-
-    # 1. Точная проверка по URL
     cur.execute("SELECT 1 FROM published_news WHERE url=?", (url,))
     if cur.fetchone():
         con.close()
         return True
-
-    # 2. Нечёткая проверка по БД (последние 80 записей, межцикловая)
     cur.execute("SELECT title FROM published_news ORDER BY created_at DESC LIMIT 80")
     recent_db_titles = [row[0] for row in cur.fetchall()]
     con.close()
-
     for old_title in recent_db_titles:
-        if titles_are_similar(title, old_title, SIMILARITY_DB):
-            log.info(f"Дубликат (БД, {SIMILARITY_DB*100:.0f}%+): '{title[:60]}'")
-            return True
-
-    # 3. Кросс-источниковая проверка: та же история уже одобрена в этом цикле
+        if titles_are_similar(title, old_title, SIMILARITY_DB): return True
     for cycle_title in cycle_titles:
-        if titles_are_similar(title, cycle_title, SIMILARITY_CYCLE):
-            log.info(f"Дубликат (цикл, {SIMILARITY_CYCLE*100:.0f}%+): '{title[:60]}' ≈ '{cycle_title[:60]}'")
-            return True
-
+        if titles_are_similar(title, cycle_title, SIMILARITY_CYCLE): return True
     return False
 
 def mark_published(url: str, title: str):
-    try:
-        con = sqlite3.connect(DB_FILE)
-        con.execute(
-            "INSERT OR IGNORE INTO published_news (url, title) VALUES (?, ?)",
-            (url, title)
-        )
-        con.commit()
-        con.close()
-    except Exception as e:
-        log.error(f"Ошибка записи в БД: {e}")
+    con = sqlite3.connect(DB_FILE)
+    con.execute("INSERT OR IGNORE INTO published_news (url, title) VALUES (?, ?)", (url, title))
+    con.commit()
+    con.close()
 
-# ---------------------------------------------------------------------------
-# AI-ОБРАБОТКА
-# ---------------------------------------------------------------------------
+# --- AI-ОБРАБОТКА (ОБНОВЛЕННЫЙ МЕТОД ПОД НОВУЮ БИБЛИОТЕКУ) ---
 def process_with_ai(title: str, description: str, tag: str) -> str | None:
-    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:2000] # У 2.0 контекст огромный
-    
+    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:2000]
     prompt = (
-        "Ты техно-блогер для Telegram-канала об AI и GoClaw — первой в мире "
-        "рекламной AI-платформе (пользователи получают бесплатный доступ к Claude/GPT/Midjourney "
-        "в обмен на то, что AI-агент публикует Stories/Shorts с их клонированным голосом; "
-        "бренды платят по CPA-модели).\n\n"
+        "Ты техно-блогер для Telegram-канала об AI и GoClaw. "
         "Перескажи новость КРАТКО на русском языке:\n"
-        "— Заголовок с одним релевантным эмодзи\n"
-        "— 3 коротких тезиса (без нумерации, каждый с эмодзи)\n"
-        "— 1 строка вывода: почему это важно для AI-рынка или для создателей контента\n"
-        "Не используй жирный шрифт **. Не пиши слово 'Заголовок' или 'Вывод'.\n\n"
-        f"Заголовок оригинала: {title}\n"
-        f"Текст новости: {clean_desc}"
+        "— Заголовок с одним эмодзи\n"
+        "— 3 тезиса с эмодзи\n"
+        "— 1 строка вывода: почему это важно\n"
+        "Не используй жирный шрифт **.\n\n"
+        f"Заголовок: {title}\nТекст: {clean_desc}"
     )
 
     try:
-        # У Gemini 2.0 Flash очень высокая скорость генерации
-        response = model.generate_content(prompt)
-        
-        if not response or not response.text:
-            return None
-            
-        res_text = response.text
-        # Убираем жирный шрифт (Markdown **), так как TG в HTML моде может криво его принять 
-        # или просто по твоему ТЗ мы его не хотим
-        final_text = res_text.replace('**', '').strip()
-        
-        return f"{tag}\n\n{final_text}"
-        
+        # Новый синтаксис google-genai
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=prompt
+        )
+        if not response.text: return None
+        return f"{tag}\n\n{response.text.replace('**', '').strip()}"
     except Exception as e:
-        log.error(f"Gemini 2.0 Error: {e}")
+        log.error(f"AI Error: {e}")
         return None
 
-# ---------------------------------------------------------------------------
-# ОТПРАВКА В TELEGRAM
-# ---------------------------------------------------------------------------
+# --- ТЕЛЕГРАМ ---
 def send_telegram(text: str, url: str) -> bool:
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
         "text": f"{text}\n\n🔗 <a href='{url}'>Источник</a>",
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "parse_mode": "HTML"
     }
     try:
         r = requests.post(api_url, json=payload, timeout=20)
-        if r.status_code != 200:
-            log.warning(f"TG вернул {r.status_code}: {r.text[:200]}")
         return r.status_code == 200
-    except Exception as e:
-        log.error(f"TG Error: {e}")
+    except:
         return False
 
-# ---------------------------------------------------------------------------
-# ОСНОВНАЯ ПРОВЕРКА
-# ---------------------------------------------------------------------------
+# --- ГЛАВНЫЙ ЦИКЛ ---
 def check_news():
-    log.info(f"--- НАЧАЛО ПРОВЕРКИ ({len(RSS_FEEDS)} лент) ---")
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; AINewsBot/2.0)'}
-
-    # Заголовки, одобренные в ЭТОМ цикле — для кросс-источниковой дедупликации
-    cycle_titles: list[str] = []
-    total_published = 0
-
+    log.info("--- ПРОВЕРКА НОВОСТЕЙ ---")
+    cycle_titles = []
     for feed_item in RSS_FEEDS:
-        url_feed = feed_item["url"]
-        tag      = feed_item["tag"]
-        keywords = feed_item.get("keywords", [])
-
-        log.info(f"Обработка: {url_feed}")
-
         try:
-            resp = requests.get(url_feed, headers=headers, timeout=25)
-            resp.raise_for_status()
+            resp = requests.get(feed_item["url"], timeout=20)
             feed = feedparser.parse(resp.content)
+            for entry in feed.entries[:MAX_PER_FEED]:
+                link = entry.get("link", "")
+                title = entry.get("title", "").strip()
+                if is_duplicate(link, title, cycle_titles): continue
+                
+                ai_text = process_with_ai(title, entry.get("summary", ""), feed_item["tag"])
+                if ai_text and send_telegram(ai_text, link):
+                    mark_published(link, title)
+                    cycle_titles.append(title)
+                    time.sleep(5)
         except Exception as e:
-            log.error(f"Ошибка загрузки ленты {url_feed}: {e}")
-            continue
+            log.error(f"Ошибка фида {feed_item['url']}: {e}")
 
-        for entry in feed.entries[:MAX_PER_FEED]:
-            link    = entry.get("link", "")
-            title   = entry.get("title", "").strip()
-            summary = entry.get("summary", "") or entry.get("description", "")
-
-            if not link or not title:
-                continue
-
-            # ── Дедупликация: по URL, по БД и по текущему циклу ───────────
-            if is_duplicate(link, title, cycle_titles):
-                continue
-
-            # ── Проверка релевантности ключевым словам ─────────────────────
-            full_text = f"{title} {re.sub(r'<[^>]+>', '', summary)}".lower()
-            if keywords and not any(kw.lower() in full_text for kw in keywords):
-                log.info(f"Нерелевантно: {title[:60]}")
-                continue
-
-            log.info(f"📰 Новая новость: {title[:80]}")
-
-            # ── AI-обработка ───────────────────────────────────────────────
-            ai_text = process_with_ai(title, summary, tag)
-            if not ai_text:
-                continue
-
-            # ── Отправка ───────────────────────────────────────────────────
-            if send_telegram(ai_text, link):
-                mark_published(link, title)
-                cycle_titles.append(title)   # Регистрируем в памяти цикла
-                total_published += 1
-                log.info(f"✅ Опубликовано: {title[:60]}")
-                time.sleep(12)
-            else:
-                log.warning(f"❌ Сбой отправки: {title[:60]}")
-
-    log.info(f"--- ПРОВЕРКА ЗАВЕРШЕНА | Опубликовано: {total_published} ---")
-
-# ---------------------------------------------------------------------------
-# ТОЧКА ВХОДА
-# ---------------------------------------------------------------------------
 def main():
     init_db()
     threading.Thread(target=run_health_server, daemon=True).start()
-    log.info("🚀 GoClaw AI News Bot v2 запущен!")
-
     while True:
         try:
             check_news()
         except Exception as e:
-            log.critical(f"Критическая ошибка в основном цикле: {e}")
-
-        log.info(f"⏳ Следующая проверка через {CHECK_INTERVAL // 60} минут...")
+            log.error(f"Цикл: {e}")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
