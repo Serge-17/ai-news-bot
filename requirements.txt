@@ -1,4 +1,3 @@
 feedparser
 requests
-google-generativeai
-huggingface_hub
+google-genai
