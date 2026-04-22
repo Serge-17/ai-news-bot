@@ -1,4 +1,4 @@
 feedparser
 requests
+google-generativeai
 huggingface_hub
-pip install -U google-generativeai
