@@ -31,7 +31,7 @@ GEMINI_TOKEN   = os.environ.get("GEMINI_TOKEN")
 MODEL_ID       = "gemini-2.0-flash" 
 DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800   
-MAX_PER_FEED   = 5
+MAX_PER_FEED   = 3
 SIMILARITY_DB  = 0.72
 SIMILARITY_CYCLE = 0.60
 
@@ -311,7 +311,7 @@ def check_news():
                     mark_published(link, title)
                     cycle_titles.append(title)
                     log.info(f"Опубликовано: {title[:50]}...")
-                    time.sleep(10)
+                    time.sleep(20)
         except Exception as e:
             log.error(f"Ошибка фида {feed_item['url']}: {e}")
 
