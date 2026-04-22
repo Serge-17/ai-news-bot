@@ -10,6 +10,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from google import genai  # Используем новую официальную библиотеку
 from difflib import SequenceMatcher
+import time
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -287,6 +289,19 @@ def send_telegram(text: str, url: str) -> bool:
     except:
         return False
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=60, max=300))
+def call_gemini(prompt):
+    try:
+        response = gemini.generate_content(prompt)
+        return response
+    except Exception as e:
+        if '429' in str(e) or 'API key expired' in str(e):
+            print(f"Ошибка API: {e}. Повтор через 60 сек...")
+            time.sleep(60)
+            raise  # Повторяем попытку
+        else:
+            raise e
+            
 def check_news():
     log.info("--- ЗАПУСК ПРОВЕРКИ ---")
     cycle_titles = []
