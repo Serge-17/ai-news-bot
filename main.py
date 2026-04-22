@@ -8,7 +8,7 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
-from google import genai  # Новая библиотека
+from google import genai  # Используем новую официальную библиотеку
 from difflib import SequenceMatcher
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
@@ -27,23 +27,26 @@ def run_health_server():
 # --- КОНФИГУРАЦИЯ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHANNEL_ID     = os.environ.get("CHANNEL_ID")
-GEMINI_TOKEN   = os.environ.get("GEMINI_TOKEN") # Используем новый токен
+GEMINI_TOKEN   = os.environ.get("GEMINI_TOKEN") 
 MODEL_ID       = "gemini-2.0-flash" 
 DB_FILE        = "ai_news.db"
 CHECK_INTERVAL = 1800   
-MAX_PER_FEED   = 5      
-SIMILARITY_DB  = 0.72   
-SIMILARITY_CYCLE = 0.60 
+MAX_PER_FEED   = 5
+SIMILARITY_DB  = 0.72
+SIMILARITY_CYCLE = 0.60
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# Инициализация клиента Gemini (новая версия)
+# Проверка наличия токена перед запуском
+if not GEMINI_TOKEN:
+    raise ValueError("ОШИБКА: Переменная GEMINI_TOKEN не найдена в окружении!")
+
+# Инициализация клиента Google AI
 client = genai.Client(api_key=GEMINI_TOKEN)
 
 # ---------------------------------------------------------------------------
 # ИСТОЧНИКИ НОВОСТЕЙ
-# Формат: url, tag (хештег в посте), keywords (хотя бы одно должно быть в тексте)
 # ---------------------------------------------------------------------------
 RSS_FEEDS = [
 
@@ -202,7 +205,9 @@ RSS_FEEDS = [
     },
 ]
 
-# --- РАБОТА С БД ---
+# ---------------------------------------------------------------------------
+# РАБОТА С БД И ДЕДУПЛИКАЦИЯ
+# ---------------------------------------------------------------------------
 def init_db():
     con = sqlite3.connect(DB_FILE)
     con.execute("""
@@ -235,43 +240,46 @@ def is_duplicate(url: str, title: str, cycle_titles: list[str]) -> bool:
     return False
 
 def mark_published(url: str, title: str):
-    con = sqlite3.connect(DB_FILE)
-    con.execute("INSERT OR IGNORE INTO published_news (url, title) VALUES (?, ?)", (url, title))
-    con.commit()
-    con.close()
+    try:
+        con = sqlite3.connect(DB_FILE)
+        con.execute("INSERT OR IGNORE INTO published_news (url, title) VALUES (?, ?)", (url, title))
+        con.commit()
+        con.close()
+    except Exception as e:
+        log.error(f"Ошибка БД: {e}")
 
-# --- AI-ОБРАБОТКА (ОБНОВЛЕННЫЙ МЕТОД ПОД НОВУЮ БИБЛИОТЕКУ) ---
+# ---------------------------------------------------------------------------
+# AI-ОБРАБОТКА
+# ---------------------------------------------------------------------------
 def process_with_ai(title: str, description: str, tag: str) -> str | None:
     clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:2000]
     prompt = (
         "Ты техно-блогер для Telegram-канала об AI и GoClaw. "
         "Перескажи новость КРАТКО на русском языке:\n"
-        "— Заголовок с одним эмодзи\n"
-        "— 3 тезиса с эмодзи\n"
+        "— Заголовок с одним релевантным эмодзи\n"
+        "— 3 коротких тезиса (каждый с эмодзи)\n"
         "— 1 строка вывода: почему это важно\n"
-        "Не используй жирный шрифт **.\n\n"
-        f"Заголовок: {title}\nТекст: {clean_desc}"
+        "Не используй жирный шрифт **. Не пиши 'Заголовок:' или 'Вывод:'.\n\n"
+        f"Оригинал: {title}\nТекст: {clean_desc}"
     )
-
     try:
-        # Новый синтаксис google-genai
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=prompt
-        )
+        response = client.models.generate_content(model=MODEL_ID, contents=prompt)
         if not response.text: return None
         return f"{tag}\n\n{response.text.replace('**', '').strip()}"
     except Exception as e:
-        log.error(f"AI Error: {e}")
+        log.error(f"Gemini Error: {e}")
         return None
 
-# --- ТЕЛЕГРАМ ---
+# ---------------------------------------------------------------------------
+# ТЕЛЕГРАМ И ЛОГИКА
+# ---------------------------------------------------------------------------
 def send_telegram(text: str, url: str) -> bool:
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
         "text": f"{text}\n\n🔗 <a href='{url}'>Источник</a>",
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
     }
     try:
         r = requests.post(api_url, json=payload, timeout=20)
@@ -279,35 +287,43 @@ def send_telegram(text: str, url: str) -> bool:
     except:
         return False
 
-# --- ГЛАВНЫЙ ЦИКЛ ---
 def check_news():
-    log.info("--- ПРОВЕРКА НОВОСТЕЙ ---")
+    log.info("--- ЗАПУСК ПРОВЕРКИ ---")
     cycle_titles = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
     for feed_item in RSS_FEEDS:
         try:
-            resp = requests.get(feed_item["url"], timeout=20)
+            resp = requests.get(feed_item["url"], headers=headers, timeout=20)
             feed = feedparser.parse(resp.content)
             for entry in feed.entries[:MAX_PER_FEED]:
-                link = entry.get("link", "")
-                title = entry.get("title", "").strip()
-                if is_duplicate(link, title, cycle_titles): continue
+                link, title = entry.get("link", ""), entry.get("title", "").strip()
+                if not link or not title or is_duplicate(link, title, cycle_titles):
+                    continue
                 
+                # Фильтр по ключевым словам
+                full_content = (title + " " + entry.get("summary", "")).lower()
+                if not any(kw.lower() in full_content for kw in feed_item["keywords"]):
+                    continue
+
                 ai_text = process_with_ai(title, entry.get("summary", ""), feed_item["tag"])
                 if ai_text and send_telegram(ai_text, link):
                     mark_published(link, title)
                     cycle_titles.append(title)
-                    time.sleep(5)
+                    log.info(f"Опубликовано: {title[:50]}...")
+                    time.sleep(10)
         except Exception as e:
             log.error(f"Ошибка фида {feed_item['url']}: {e}")
 
 def main():
     init_db()
     threading.Thread(target=run_health_server, daemon=True).start()
+    log.info("🚀 Бот запущен!")
     while True:
         try:
             check_news()
         except Exception as e:
-            log.error(f"Цикл: {e}")
+            log.error(f"Ошибка цикла: {e}")
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
