@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from google import genai  # Используем новую официальную библиотеку
 from difflib import SequenceMatcher
 from html import escape
+from urllib.parse import quote
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -37,6 +38,8 @@ SIMILARITY_CYCLE = 0.60
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+http = requests.Session()
+gemini_retry_after = 0.0
 
 # Инициализация клиента Google AI
 client = genai.Client(api_key=GEMINI_TOKEN) if GEMINI_TOKEN else None
@@ -248,7 +251,10 @@ def mark_published(url: str, title: str):
 # AI-ОБРАБОТКА
 # ---------------------------------------------------------------------------
 def process_with_ai(title: str, description: str, tag: str) -> str | None:
+    global gemini_retry_after
     if not client:
+        return None
+    if time.time() < gemini_retry_after:
         return None
     clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:2000]
     prompt = (
@@ -266,6 +272,9 @@ def process_with_ai(title: str, description: str, tag: str) -> str | None:
         return f"{tag}\n\n{response.text.replace('**', '').strip()}"
     except Exception as e:
         log.error(f"Gemini Error: {e}")
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            gemini_retry_after = time.time() + 3600
+            log.warning("Gemini временно отключен на 1 час из-за превышения квоты.")
         return None
 
 # ---------------------------------------------------------------------------
@@ -273,20 +282,30 @@ def process_with_ai(title: str, description: str, tag: str) -> str | None:
 # ---------------------------------------------------------------------------
 def send_telegram(text: str, url: str) -> bool:
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
+    safe_text = text[:3500].strip()
+    html_payload = {
         "chat_id": CHANNEL_ID,
-        "text": f"{text}\n\n🔗 <a href='{escape(url, quote=True)}'>Источник</a>",
+        "text": f"{safe_text}\n\n🔗 <a href='{escape(url, quote=True)}'>Источник</a>",
         "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True,
     }
-    try:
-        r = requests.post(api_url, json=payload, timeout=20)
-        if r.status_code != 200:
-            log.error(f"Telegram Error {r.status_code}: {r.text[:500]}")
-        return r.status_code == 200
-    except Exception as e:
-        log.error(f"Telegram request error: {e}")
-        return False
+    plain_payload = {
+        "chat_id": CHANNEL_ID,
+        "text": f"{safe_text}\n\nИсточник: {url}",
+        "disable_web_page_preview": True,
+    }
+
+    for idx, payload in enumerate((html_payload, plain_payload), start=1):
+        try:
+            r = http.post(api_url, json=payload, timeout=(10, 45))
+            if r.status_code == 200:
+                return True
+            log.error(f"Telegram Error {r.status_code} on try {idx}: {r.text[:500]}")
+        except requests.exceptions.Timeout as e:
+            log.error(f"Telegram timeout on try {idx}: {e}")
+        except Exception as e:
+            log.error(f"Telegram request error on try {idx}: {e}")
+    return False
 
 def build_fallback_post(title: str, description: str, tag: str) -> str:
     clean_desc = re.sub(r'<[^>]+>', '', (description or ""))
@@ -326,6 +345,8 @@ def check_news():
                     cycle_titles.append(title)
                     log.info(f"Опубликовано: {title[:50]}...")
                     time.sleep(5)
+                else:
+                    log.error(f"Не удалось отправить в Telegram: {title[:80]}")
         except Exception as e:
             log.error(f"Ошибка фида {feed_item['url']}: {e}")
 
