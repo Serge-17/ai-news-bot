@@ -8,6 +8,7 @@ import re
 import threading
 import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from deep_translator import GoogleTranslator
 from google import genai  # Используем новую официальную библиотеку
 from difflib import SequenceMatcher
 from html import escape
@@ -47,6 +48,7 @@ urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 
 http = requests.Session()
 gemini_retry_after = 0.0
+translator = GoogleTranslator(source="auto", target="ru")
 
 # Инициализация клиента Google AI
 client = genai.Client(api_key=GEMINI_TOKEN) if GEMINI_TOKEN else None
@@ -320,6 +322,26 @@ def _clean_text(text: str) -> str:
     return text
 
 
+def _looks_russian(text: str) -> bool:
+    if not text:
+        return True
+    cyr = len(re.findall(r"[А-Яа-яЁё]", text))
+    lat = len(re.findall(r"[A-Za-z]", text))
+    return cyr >= lat
+
+
+def _translate_to_ru(text: str) -> str:
+    clean = _clean_text(text)
+    if not clean or _looks_russian(clean):
+        return clean
+    try:
+        translated = translator.translate(clean)
+        return _clean_text(translated or clean)
+    except Exception as e:
+        log.warning(f"Translate fallback failed: {e}")
+        return clean
+
+
 def _shorten(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -348,8 +370,9 @@ def _extract_points(description: str) -> list[str]:
 
 def build_fallback_post(title: str, description: str, tag: str) -> str:
     safe_tag = escape(tag)
-    safe_title = escape(_shorten(_clean_text(title), 180))
-    points = _extract_points(description)
+    ru_title = _shorten(_translate_to_ru(title), 180)
+    points = [_translate_to_ru(point) for point in _extract_points(description)]
+    safe_title = escape(ru_title)
 
     lines = [
         safe_tag,
