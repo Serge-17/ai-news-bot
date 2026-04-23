@@ -7,11 +7,9 @@ import requests
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse
 from google import genai  # Используем новую официальную библиотеку
 from difflib import SequenceMatcher
-import time
-from tenacity import retry, stop_after_attempt, wait_exponential
+from html import escape
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -40,12 +38,8 @@ SIMILARITY_CYCLE = 0.60
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# Проверка наличия токена перед запуском
-if not GEMINI_TOKEN:
-    raise ValueError("ОШИБКА: Переменная GEMINI_TOKEN не найдена в окружении!")
-
 # Инициализация клиента Google AI
-client = genai.Client(api_key=GEMINI_TOKEN)
+client = genai.Client(api_key=GEMINI_TOKEN) if GEMINI_TOKEN else None
 
 # ---------------------------------------------------------------------------
 # ИСТОЧНИКИ НОВОСТЕЙ
@@ -254,6 +248,8 @@ def mark_published(url: str, title: str):
 # AI-ОБРАБОТКА
 # ---------------------------------------------------------------------------
 def process_with_ai(title: str, description: str, tag: str) -> str | None:
+    if not client:
+        return None
     clean_desc = re.sub(r'<[^>]+>', '', (description or ""))[:2000]
     prompt = (
         "Ты техно-блогер для Telegram-канала об AI и GoClaw. "
@@ -279,28 +275,29 @@ def send_telegram(text: str, url: str) -> bool:
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_ID,
-        "text": f"{text}\n\n🔗 <a href='{url}'>Источник</a>",
+        "text": f"{text}\n\n🔗 <a href='{escape(url, quote=True)}'>Источник</a>",
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
     try:
         r = requests.post(api_url, json=payload, timeout=20)
+        if r.status_code != 200:
+            log.error(f"Telegram Error {r.status_code}: {r.text[:500]}")
         return r.status_code == 200
-    except:
+    except Exception as e:
+        log.error(f"Telegram request error: {e}")
         return False
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=60, max=300))
-def call_gemini(prompt):
-    try:
-        response = gemini.generate_content(prompt)
-        return response
-    except Exception as e:
-        if '429' in str(e) or 'API key expired' in str(e):
-            print(f"Ошибка API: {e}. Повтор через 60 сек...")
-            time.sleep(60)
-            raise  # Повторяем попытку
-        else:
-            raise e
+def build_fallback_post(title: str, description: str, tag: str) -> str:
+    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))
+    clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
+    short_desc = clean_desc[:400] + ("..." if len(clean_desc) > 400 else "")
+    return (
+        f"{tag}\n\n"
+        f"📰 {title}\n"
+        f"• {short_desc or 'Описание в источнике отсутствует.'}\n"
+        f"• Почему важно: новость попала в выбранную AI-повестку."
+    )
             
 def check_news():
     log.info("--- ЗАПУСК ПРОВЕРКИ ---")
@@ -322,15 +319,21 @@ def check_news():
                     continue
 
                 ai_text = process_with_ai(title, entry.get("summary", ""), feed_item["tag"])
-                if ai_text and send_telegram(ai_text, link):
+                final_text = ai_text or build_fallback_post(title, entry.get("summary", ""), feed_item["tag"])
+
+                if send_telegram(final_text, link):
                     mark_published(link, title)
                     cycle_titles.append(title)
                     log.info(f"Опубликовано: {title[:50]}...")
-                    time.sleep(20)
+                    time.sleep(5)
         except Exception as e:
             log.error(f"Ошибка фида {feed_item['url']}: {e}")
 
 def main():
+    if not TELEGRAM_TOKEN or not CHANNEL_ID:
+        raise ValueError("ОШИБКА: TELEGRAM_TOKEN или CHANNEL_ID не заданы.")
+    if not GEMINI_TOKEN:
+        log.warning("GEMINI_TOKEN не задан. Бот будет публиковать новости без AI-пересказа.")
     init_db()
     threading.Thread(target=run_health_server, daemon=True).start()
     log.info("🚀 Бот запущен!")
