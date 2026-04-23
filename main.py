@@ -294,12 +294,12 @@ def send_telegram(text: str, url: str) -> bool:
         "chat_id": CHANNEL_ID,
         "text": f"{safe_text}\n\n🔗 <a href='{escape(url, quote=True)}'>Источник</a>",
         "parse_mode": "HTML",
-        "disable_web_page_preview": True,
+        "disable_web_page_preview": False,
     }
     plain_payload = {
         "chat_id": CHANNEL_ID,
         "text": f"{safe_text}\n\nИсточник: {url}",
-        "disable_web_page_preview": True,
+        "disable_web_page_preview": False,
     }
 
     for idx, payload in enumerate((html_payload, plain_payload), start=1):
@@ -314,16 +314,61 @@ def send_telegram(text: str, url: str) -> bool:
             log.error(f"Telegram request error on try {idx}: {e}")
     return False
 
+def _clean_text(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _shorten(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip(" ,.;:-") + "..."
+
+
+def _extract_points(description: str) -> list[str]:
+    clean_desc = _clean_text(description)
+    if not clean_desc:
+        return []
+
+    parts = re.split(r"(?<=[.!?])\s+", clean_desc)
+    points = []
+    for part in parts:
+        part = part.strip(" -•")
+        if len(part) < 35:
+            continue
+        points.append(_shorten(part, 160))
+        if len(points) == 2:
+            break
+
+    if not points:
+        points.append(_shorten(clean_desc, 160))
+    return points
+
+
 def build_fallback_post(title: str, description: str, tag: str) -> str:
-    clean_desc = re.sub(r'<[^>]+>', '', (description or ""))
-    clean_desc = re.sub(r'\s+', ' ', clean_desc).strip()
-    short_desc = clean_desc[:400] + ("..." if len(clean_desc) > 400 else "")
-    return (
-        f"{tag}\n\n"
-        f"📰 {title}\n"
-        f"• {short_desc or 'Описание в источнике отсутствует.'}\n"
-        f"• Почему важно: новость попала в выбранную AI-повестку."
+    safe_tag = escape(tag)
+    safe_title = escape(_shorten(_clean_text(title), 180))
+    points = _extract_points(description)
+
+    lines = [
+        safe_tag,
+        "",
+        f"<b>{safe_title}</b>",
+        "",
+    ]
+
+    bullet_icons = ["•", "•"]
+    for icon, point in zip(bullet_icons, points):
+        lines.append(f"{icon} {escape(point)}")
+
+    lines.extend(
+        [
+            "",
+            "<i>Почему важно:</i> тема уже в актуальной AI-повестке и может быстро разойтись по рынку.",
+        ]
     )
+    return "\n".join(lines)
             
 def check_news():
     log.info("--- ЗАПУСК ПРОВЕРКИ ---")
