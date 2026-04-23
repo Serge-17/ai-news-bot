@@ -6,11 +6,13 @@ import logging
 import requests
 import re
 import threading
+import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from google import genai  # Используем новую официальную библиотеку
 from difflib import SequenceMatcher
 from html import escape
 from urllib.parse import quote
+import urllib3.util.connection as urllib3_cn
 
 # --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -38,6 +40,11 @@ SIMILARITY_CYCLE = 0.60
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+# В некоторых контейнерах HF запросы к Telegram зависают на IPv6.
+# Принудительно используем IPv4 для requests/urllib3.
+urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+
 http = requests.Session()
 gemini_retry_after = 0.0
 
