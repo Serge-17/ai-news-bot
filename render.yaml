@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ai-news-bot
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: GEMINI_TOKEN
+        sync: false
+      - key: CHECK_INTERVAL
+        value: "1800"
+      - key: MAX_PER_FEED
+        value: "2"
