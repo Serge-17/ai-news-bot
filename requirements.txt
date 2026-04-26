@@ -1,4 +1,0 @@
-feedparser
-requests
-google-genai
-deep-translator
