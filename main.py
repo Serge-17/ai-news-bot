@@ -44,13 +44,160 @@ def start_health_server():
 
 # ─── RSS ФИДЫ (только самые надёжные) ──────────────────────────
 FEEDS = [
-    {"url": "https://techcrunch.com/category/artificial-intelligence/feed/", "tag": "#AI"},
-    {"url": "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",  "tag": "#AI"},
-    {"url": "https://venturebeat.com/category/ai/feed/",                          "tag": "#AI"},
-    {"url": "https://openai.com/news/rss.xml",                                    "tag": "#OpenAI"},
-    {"url": "https://www.anthropic.com/rss.xml",                                  "tag": "#Anthropic"},
-    {"url": "https://huggingface.co/blog/feed.xml",                               "tag": "#OpenSource"},
-    {"url": "https://habr.com/ru/rss/hub/artificial_intelligence/all/",           "tag": "#AIРу"},
+
+    # ── ОБЩИЕ НОВОСТИ ИИ ───────────────────────────────────────────────────
+    {
+        "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "model", "startup", "llm", "openai", "anthropic", "gemini"]
+    },
+    {
+        "url": "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "agent", "llm", "automation", "openai", "google", "meta"]
+    },
+    {
+        "url": "https://venturebeat.com/category/ai/feed/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "model", "agent", "inference", "enterprise"]
+    },
+    {
+        "url": "https://www.artificialintelligence-news.com/feed/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "machine learning", "neural", "model"]
+    },
+    {
+        "url": "https://openai.com/news/rss.xml",
+        "tag": "#НовостиИИ",
+        "keywords": ["gpt", "openai", "sora", "agents", "o1", "o3"]
+    },
+    {
+        "url": "https://www.anthropic.com/rss.xml",
+        "tag": "#НовостиИИ",
+        "keywords": ["claude", "anthropic", "safety", "agent"]
+    },
+    {
+        "url": "https://ai.googleblog.com/feeds/posts/default",
+        "tag": "#НовостиИИ",
+        "keywords": ["ai", "gemini", "model", "research", "agent"]
+    },
+    {
+        "url": "https://huggingface.co/blog/feed.xml",
+        "tag": "#OpenSourceAI",
+        "keywords": ["model", "dataset", "agent", "fine-tuning", "open-source", "lora"]
+    },
+    {
+        "url": "https://habr.com/ru/rss/hub/artificial_intelligence/all/",
+        "tag": "#НовостиИИ",
+        "keywords": ["ии", "нейросети", "ml", "llm", "агент", "модель"]
+    },
+    {
+        "url": "https://vc.ru/rss/u/1215160-iskusstvennyy-intellekt",
+        "tag": "#НовостиИИ",
+        "keywords": ["ии", "нейросети", "gpt", "claude", "модель"]
+    },
+
+    # ── ГОЛОС / TTS / КЛОНИРОВАНИЕ ГОЛОСА ─────────────────────────────────
+    {
+        "url": "https://blogs.nvidia.com/feed/",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "tts", "audio", "cloning", "synthesis", "deepfake voice"]
+    },
+    {
+        "url": "https://techcrunch.com/tag/voice/feed/",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "audio", "clone", "synthesis", "eleven labs", "elevenlabs"]
+    },
+    {
+        "url": "https://elevenlabs.io/blog/rss.xml",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "audio", "clone", "tts"]
+    },
+    {
+        "url": "https://www.deepmind.com/blog/rss.xml",
+        "tag": "#ГолосовойАИ",
+        "keywords": ["voice", "speech", "audio", "language", "model", "gemini"]
+    },
+
+    # ── СОЦИАЛЬНЫЕ СЕТИ / CREATOR ECONOMY ─────────────────────────────────
+    {
+        "url": "https://socialmediatoday.com/rss.xml",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "reels", "shorts", "tiktok", "instagram", "ai content", "ugc", "influencer"]
+    },
+    {
+        "url": "https://www.socialmediaexaminer.com/feed/",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "shorts", "reels", "ai", "automation", "content", "brand"]
+    },
+    {
+        "url": "https://later.com/blog/feed/",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "social media", "reels", "shorts", "tiktok", "instagram", "brand deal"]
+    },
+    {
+        "url": "https://www.tubefilter.com/feed/",
+        "tag": "#КреаторЭкономика",
+        "keywords": ["creator", "youtube", "shorts", "monetization", "sponsor", "brand", "influencer"]
+    },
+
+    # ── AD TECH / МОНЕТИЗАЦИЯ / CPA ────────────────────────────────────────
+    {
+        "url": "https://adexchanger.com/feed/",
+        "tag": "#AdTech",
+        "keywords": ["programmatic", "cpa", "cpc", "brand", "ad", "affiliate", "performance", "ai"]
+    },
+    {
+        "url": "https://martech.org/feed/",
+        "tag": "#AdTech",
+        "keywords": ["ai", "brand", "marketing", "automation", "cpa", "conversion", "affiliate"]
+    },
+    {
+        "url": "https://digiday.com/feed/",
+        "tag": "#AdTech",
+        "keywords": ["brand", "ad", "creator", "influencer", "cpa", "ai", "monetization", "social"]
+    },
+    {
+        "url": "https://www.marketingweek.com/feed/",
+        "tag": "#AdTech",
+        "keywords": ["brand", "ad", "creator", "influencer", "ai", "affiliate", "performance marketing"]
+    },
+
+    # ── AI-АГЕНТЫ / АВТОМАТИЗАЦИЯ ──────────────────────────────────────────
+    {
+        "url": "https://agentsnews.io/rss.xml",
+        "tag": "#AIАгенты",
+        "keywords": ["agent", "automation", "workflow", "autonomous", "agentic", "multi-agent"]
+    },
+    {
+        "url": "https://www.llmsecurity.net/rss.xml",
+        "tag": "#AIАгенты",
+        "keywords": ["agent", "llm", "autonomous", "tool use", "multi-agent"]
+    },
+    {
+        "url": "https://techcrunch.com/tag/automation/feed/",
+        "tag": "#AIАгенты",
+        "keywords": ["automation", "agent", "ai", "workflow", "autonomous"]
+    },
+
+    # ── СТАРТАПЫ / ИНВЕСТИЦИИ ──────────────────────────────────────────────
+    {
+        "url": "https://techcrunch.com/category/startups/feed/",
+        "tag": "#AIСтартапы",
+        "keywords": ["ai", "funding", "series", "seed", "startup", "venture", "raise"]
+    },
+    {
+        "url": "https://sifted.eu/rss",
+        "tag": "#AIСтартапы",
+        "keywords": ["ai", "startup", "funding", "series", "venture", "raise", "scaleup"]
+    },
+
+    # ── БЕСПЛАТНЫЙ AI / FREEMIUM МОДЕЛИ ───────────────────────────────────
+    {
+        "url": "https://techcrunch.com/tag/free/feed/",
+        "tag": "#БесплатныйAI",
+        "keywords": ["free", "freemium", "open-source", "no-code", "affordable", "subscription", "access"]
+    },
 ]
 
 # ─── БАЗА ДАННЫХ ────────────────────────────────────────────────
@@ -141,8 +288,7 @@ def make_fallback(title: str, desc: str, tag: str) -> str:
 
 # ─── TELEGRAM ───────────────────────────────────────────────────
 def send_telegram(text: str, url: str) -> bool:
-    TG_API_BASE = os.environ.get("TG_API_BASE", "https://api.telegram.org")
-    api = f"{TG_API_BASE}/bot{TELEGRAM_TOKEN}/sendMessage"
+    api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     body = {
         "chat_id": CHANNEL_ID,
         "text": f"{text[:3800]}\n\n🔗 <a href='{escape(url)}'>Источник</a>",
