@@ -141,7 +141,8 @@ def make_fallback(title: str, desc: str, tag: str) -> str:
 
 # ─── TELEGRAM ───────────────────────────────────────────────────
 def send_telegram(text: str, url: str) -> bool:
-    api = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    TG_API_BASE = os.environ.get("TG_API_BASE", "https://api.telegram.org")
+    api = f"{TG_API_BASE}/bot{TELEGRAM_TOKEN}/sendMessage"
     body = {
         "chat_id": CHANNEL_ID,
         "text": f"{text[:3800]}\n\n🔗 <a href='{escape(url)}'>Источник</a>",
