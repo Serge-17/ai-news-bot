@@ -13,6 +13,25 @@ from google import genai
 from difflib import SequenceMatcher
 from html import escape
 import urllib3.util.connection as urllib3_cn
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args):
+        pass  # заглушить логи
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", 7860), HealthHandler)
+    server.serve_forever()
+
+# Запустить в фоне перед стартом бота
+threading.Thread(target=run_health_server, daemon=True).start()
+
+# ... дальше ваш существующий код бота
 
 # --- HEALTH CHECK СЕРВЕР ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
