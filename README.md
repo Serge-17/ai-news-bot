@@ -1,6 +1,7 @@
 # 📰 AI News Bot
 
 > **Telegram-бот для автоматического мониторинга и публикации новостей об искусственном интеллекте**
+> @new_news_ai
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
